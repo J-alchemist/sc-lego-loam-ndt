@@ -1,0 +1,9 @@
+<launch>
+
+    <!-- 注意与 ndt_localizer.launch 的tf一致 -->
+    <!-- <node pkg="tf2_ros" type="static_transform_publisher" name="localizer_to_base_link" args="0 0 0 3.1415926 0 0 base_link lidar"/> -->
+    <node pkg="tf2_ros" type="static_transform_publisher" name="world_to_map" args="0 0 0 0 0 0 map world" />
+
+</launch>
+
+

@@ -1,0 +1,2 @@
+pcl_viewer test.pcd -ax 5 #5表示轴的放大倍数, 且显示坐标轴
+
