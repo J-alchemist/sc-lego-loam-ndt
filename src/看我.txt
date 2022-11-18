@@ -1,0 +1,4 @@
+sc-lego-loam建图
+使用ndt\ndt_omp, gicp/gicp_omp进行已知地图的定位
+
+gicp/gicp_omp(不行)

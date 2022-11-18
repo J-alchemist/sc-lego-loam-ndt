@@ -24,22 +24,22 @@
 
 #include <pcl/point_types.h>
 #include <pcl_conversions/pcl_conversions.h>
-#include <pcl/registration/ndt.h>
+#include <pcl/registration/gicp.h>
 #include <pcl_ros/point_cloud.h>
 #include <pcl_ros/transforms.h>
 
 
-#define USE_NDT_OMP_SPEEDUP              // 是否开启omp加速
+#define USE_GICP_OMP_SPEEDUP              // 是否开启omp加速
 
-#ifdef USE_NDT_OMP_SPEEDUP
-#include <pclomp/ndt_omp.h>
+#ifdef USE_GICP_OMP_SPEEDUP
+#include <pclomp/gicp_omp.h>
 #endif
 
-class NdtLocalizer{
+class GicpLocalizer{
 public:
 
-    NdtLocalizer(ros::NodeHandle &nh, ros::NodeHandle &private_nh);
-    ~NdtLocalizer();
+    GicpLocalizer(ros::NodeHandle &nh, ros::NodeHandle &private_nh);
+    ~GicpLocalizer();
 
 private:
     ros::NodeHandle nh_, private_nh_;
@@ -49,16 +49,15 @@ private:
     ros::Subscriber sensor_points_sub_;
 
     ros::Publisher sensor_aligned_pose_pub_;
-    ros::Publisher ndt_pose_pub_, ndt_odom_pub_;
+    ros::Publisher gicp_pose_pub_, gicp_odom_pub_;
     ros::Publisher exe_time_pub_;
-    ros::Publisher transform_probability_pub_;
-    ros::Publisher iteration_num_pub_;
     ros::Publisher diagnostics_pub_;
 
-#ifdef USE_NDT_OMP_SPEEDUP
-    pclomp::NormalDistributionsTransform<pcl::PointXYZ, pcl::PointXYZ> ndt_;
+
+#ifdef USE_GICP_OMP_SPEEDUP
+    boost::shared_ptr<pclomp::GeneralizedIterativeClosestPoint<pcl::PointXYZ, pcl::PointXYZ>> gicp_;
 #else
-    pcl::NormalDistributionsTransform<pcl::PointXYZ, pcl::PointXYZ> ndt_;
+    boost::shared_ptr<pcl::GeneralizedIterativeClosestPoint<pcl::PointXYZ, pcl::PointXYZ>> gicp_;
 #endif
 
     tf2_ros::Buffer tf2_buffer_;
@@ -72,12 +71,12 @@ private:
     std::string base_frame_;
     std::string map_frame_;
 
-    // init guess for ndt
+    // init guess for gicp
     geometry_msgs::PoseWithCovarianceStamped initial_pose_cov_msg_;
 
-    std::mutex ndt_map_mtx_;
+    std::mutex gicp_map_mtx_;
 
-    double converged_param_transform_probability_;
+    double sm_score_;
     std::thread diagnostic_thread_;
     std::map<std::string, std::string> key_value_stdmap_;
 
@@ -98,4 +97,4 @@ private:
     void callback_init_pose(const geometry_msgs::PoseWithCovarianceStamped::ConstPtr & pose_conv_msg_ptr);
     void callback_pointcloud(const sensor_msgs::PointCloud2::ConstPtr & pointcloud2_msg_ptr);
 
-};// NdtLocalizer Core
+};// GicpLocalizer Core

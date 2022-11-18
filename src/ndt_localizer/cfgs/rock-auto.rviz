@@ -120,7 +120,7 @@ Visualization Manager:
       Max Color: 255; 255; 255
       Max Intensity: 255
       Min Color: 0; 0; 0
-      Min Intensity: 7
+      Min Intensity: 11
       Name: RealTimePointCloud2
       Position Transformer: XYZ
       Queue Size: 10
@@ -238,25 +238,25 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz/XYOrbit
-      Distance: 54.0086975
+      Distance: 42.8902473
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.0599999987
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: -0.592474103
-        Y: 0.228502274
-        Z: -3.33786011e-06
+        X: -3.34355855
+        Y: 4.84472752
+        Z: 0
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.0500000007
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.00999999978
-      Pitch: -0.0747963637
-      Target Frame: base_link
+      Pitch: -1.09960127
+      Target Frame: lidar
       Value: XYOrbit (rviz)
-      Yaw: 1.51539981
+      Yaw: 1.57039821
     Saved: ~
 Window Geometry:
   Displays:

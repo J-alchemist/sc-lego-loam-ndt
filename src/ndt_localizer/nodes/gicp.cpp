@@ -1,38 +1,39 @@
-#include "ndt.h"
+#include "gicp.h"
 
-// 实测 速腾南部校区点云地图, 20hz
-NdtLocalizer::NdtLocalizer(ros::NodeHandle &nh, ros::NodeHandle &private_nh):nh_(nh), private_nh_(private_nh), tf2_listener_(tf2_buffer_){
+GicpLocalizer::GicpLocalizer(ros::NodeHandle &nh, ros::NodeHandle &private_nh) : 
+    nh_(nh), private_nh_(private_nh), tf2_listener_(tf2_buffer_), 
+    gicp_(new pclomp::GeneralizedIterativeClosestPoint<pcl::PointXYZ, pcl::PointXYZ>())
+    // gicp_(new pcl::GeneralizedIterativeClosestPoint<pcl::PointXYZ, pcl::PointXYZ>())
+{
 
   key_value_stdmap_["state"] = "Initializing";
   init_params();
 
   // Publishers
   sensor_aligned_pose_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("points_aligned", 10);   // 配准后的点云
-  ndt_pose_pub_ = nh_.advertise<geometry_msgs::PoseStamped>("ndt_pose", 10);      // 定位信息
-  ndt_odom_pub_ = nh_.advertise<nav_msgs::Odometry>("ndt_path_odom", 10);      // path
+  gicp_pose_pub_ = nh_.advertise<geometry_msgs::PoseStamped>("ndt_pose", 10);      // 定位信息
+  gicp_odom_pub_ = nh_.advertise<nav_msgs::Odometry>("ndt_path_odom", 10);         // path
 
   // exe_time_pub_ = nh_.advertise<std_msgs::Float32>("exe_time_ms", 10);   // 匹配时间
-  // transform_probability_pub_ = nh_.advertise<std_msgs::Float32>("transform_probability", 10); // 匹配得分
-  // iteration_num_pub_ = nh_.advertise<std_msgs::Float32>("iteration_num", 10);    // 迭代次数
   diagnostics_pub_ = nh_.advertise<diagnostic_msgs::DiagnosticArray>("diagnostics", 10);
 
   // Subscribers
-  initial_pose_sub_ = nh_.subscribe("initialpose", 100, &NdtLocalizer::callback_init_pose, this);   // 初始位姿
-  map_points_sub_ = nh_.subscribe("points_map", 1, &NdtLocalizer::callback_pointsmap, this);    // 地图作为目标点云
-  sensor_points_sub_ = nh_.subscribe("filtered_points", 1, &NdtLocalizer::callback_pointcloud, this);   // 实时点云作为源点云     // lidar
+  initial_pose_sub_ = nh_.subscribe("initialpose", 100, &GicpLocalizer::callback_init_pose, this);   // 初始位姿, 由rviz发布
+  map_points_sub_ = nh_.subscribe("points_map", 1, &GicpLocalizer::callback_pointsmap, this);    // 地图作为目标点云
+  sensor_points_sub_ = nh_.subscribe("filtered_points", 1, &GicpLocalizer::callback_pointcloud, this);   // 实时点云作为源点云     // lidar
 
-  diagnostic_thread_ = std::thread(&NdtLocalizer::timer_diagnostic, this);    // ndt匹配速度警示信息
+  diagnostic_thread_ = std::thread(&GicpLocalizer::timer_diagnostic, this);    // gicp匹配速度警示信息 
   diagnostic_thread_.detach();
 } 
 
-NdtLocalizer::~NdtLocalizer() {}
+GicpLocalizer::~GicpLocalizer() {}
 
-void NdtLocalizer::timer_diagnostic()
+void GicpLocalizer::timer_diagnostic()
 {
   ros::Rate rate(100);
   while (ros::ok()) {
     diagnostic_msgs::DiagnosticStatus diag_status_msg;
-    diag_status_msg.name = "ndt_scan_matcher";
+    diag_status_msg.name = "gicp_scan_matcher";
     diag_status_msg.hardware_id = "";
 
     for (const auto & key_value : key_value_stdmap_) {
@@ -44,7 +45,7 @@ void NdtLocalizer::timer_diagnostic()
 
     diag_status_msg.level = diagnostic_msgs::DiagnosticStatus::OK;
     diag_status_msg.message = "";
-    if (key_value_stdmap_.count("state") && key_value_stdmap_["state"] == "Initializing") {
+    if (key_value_stdmap_.count("state") && key_value_stdmap_["state"] == "Initializing") {   // count: 根据键查找map类型的数据个数
       diag_status_msg.level = diagnostic_msgs::DiagnosticStatus::WARN;
       diag_status_msg.message += "Initializing State. ";
     }
@@ -68,7 +69,7 @@ void NdtLocalizer::timer_diagnostic()
   }
 }
 
-void NdtLocalizer::callback_init_pose(
+void GicpLocalizer::callback_init_pose(
   const geometry_msgs::PoseWithCovarianceStamped::ConstPtr & initial_pose_msg_ptr)
 {
   // 初始位姿
@@ -106,48 +107,45 @@ void NdtLocalizer::callback_init_pose(
   init_pose = false; 
 }
 
-void NdtLocalizer::callback_pointsmap(
+void GicpLocalizer::callback_pointsmap(
   const sensor_msgs::PointCloud2::ConstPtr & map_points_msg_ptr)
 {
-  const auto trans_epsilon = ndt_.getTransformationEpsilon();
-  const auto step_size = ndt_.getStepSize();
-  const auto resolution = ndt_.getResolution();
-  const auto max_iterations = ndt_.getMaximumIterations();
+  const auto trans_epsilon = gicp_->getTransformationEpsilon();
+  const auto cor_dist = gicp_->getMaxCorrespondenceDistance();
+  const auto euc_eps = gicp_->getEuclideanFitnessEpsilon();
+  const auto max_iterations = gicp_->getMaximumIterations();
 
-#ifdef USE_NDT_OMP_SPEEDUP
-  pclomp::NormalDistributionsTransform<pcl::PointXYZ, pcl::PointXYZ> ndt_new;
-  ndt_new.setNumThreads(omp_get_max_threads());
-  ndt_new.setNeighborhoodSearchMethod(pclomp::DIRECT7);   //pclomp::KDTREE, pclomp::DIRECT7, pclomp::DIRECT1
-
+#ifdef USE_GICP_OMP_SPEEDUP
+  boost::shared_ptr<pclomp::GeneralizedIterativeClosestPoint<pcl::PointXYZ, pcl::PointXYZ>> gicp_new(new pclomp::GeneralizedIterativeClosestPoint<pcl::PointXYZ, pcl::PointXYZ>());
 #else
-  pcl::NormalDistributionsTransform<pcl::PointXYZ, pcl::PointXYZ> ndt_new;
-
+  boost::shared_ptr<pcl::GeneralizedIterativeClosestPoint<pcl::PointXYZ, pcl::PointXYZ>> gicp_new(new pcl::GeneralizedIterativeClosestPoint<pcl::PointXYZ, pcl::PointXYZ>());
 #endif
-  ndt_new.setTransformationEpsilon(trans_epsilon);
-  ndt_new.setStepSize(step_size);
-  ndt_new.setResolution(resolution);
-  ndt_new.setMaximumIterations(max_iterations);
+
+  gicp_new->setTransformationEpsilon(trans_epsilon);
+  gicp_new->setMaxCorrespondenceDistance(cor_dist);
+  gicp_new->setEuclideanFitnessEpsilon(euc_eps);
+  gicp_new->setMaximumIterations(max_iterations);
 
   pcl::PointCloud<pcl::PointXYZ>::Ptr map_points_ptr(new pcl::PointCloud<pcl::PointXYZ>);
   pcl::fromROSMsg(*map_points_msg_ptr, *map_points_ptr);
-  ndt_new.setInputTarget(map_points_ptr);
+  gicp_new->setInputTarget(map_points_ptr);
   // create Thread
   // detach
   pcl::PointCloud<pcl::PointXYZ>::Ptr output_cloud(new pcl::PointCloud<pcl::PointXYZ>);
-  ndt_new.align(*output_cloud, Eigen::Matrix4f::Identity());
+  gicp_new->align(*output_cloud, Eigen::Matrix4f::Identity());
 
   // swap
-  ndt_map_mtx_.lock();
-  ndt_ = ndt_new;
-  ndt_map_mtx_.unlock();
-}
+  gicp_map_mtx_.lock();
+  gicp_ = gicp_new; 
+  gicp_map_mtx_.unlock();
+} 
 
-void NdtLocalizer::callback_pointcloud(
+void GicpLocalizer::callback_pointcloud( 
   const sensor_msgs::PointCloud2::ConstPtr & sensor_points_sensorTF_msg_ptr)
 {
   const auto exe_start_time = std::chrono::system_clock::now();
   // mutex Map
-  std::lock_guard<std::mutex> lock(ndt_map_mtx_);
+  std::lock_guard<std::mutex> lock(gicp_map_mtx_);
 
   const std::string sensor_frame = sensor_points_sensorTF_msg_ptr->header.frame_id;
   const auto sensor_ros_time = sensor_points_sensorTF_msg_ptr->header.stamp;
@@ -156,6 +154,8 @@ void NdtLocalizer::callback_pointcloud(
     new pcl::PointCloud<pcl::PointXYZ>);
 
   pcl::fromROSMsg(*sensor_points_sensorTF_msg_ptr, *sensor_points_sensorTF_ptr);
+  // pcl::io::savePCDFileASCII("/home/gj/Desktop/1.pcd", *sensor_points_sensorTF_ptr);    // 保存一帧点云 用于测试
+  
   // get TF base to sensor
   geometry_msgs::TransformStamped::Ptr TF_base_to_sensor_ptr(new geometry_msgs::TransformStamped);
   get_transform(base_frame_, sensor_frame, TF_base_to_sensor_ptr);
@@ -165,22 +165,25 @@ void NdtLocalizer::callback_pointcloud(
 
   boost::shared_ptr<pcl::PointCloud<pcl::PointXYZ>> sensor_points_baselinkTF_ptr(
     new pcl::PointCloud<pcl::PointXYZ>);
+
   pcl::transformPointCloud(
     *sensor_points_sensorTF_ptr, *sensor_points_baselinkTF_ptr, base_to_sensor_matrix);
   
   // set input point cloud
-  ndt_.setInputSource(sensor_points_baselinkTF_ptr);
+  gicp_->setInputSource(sensor_points_baselinkTF_ptr);
 
-  if (ndt_.getInputTarget() == nullptr) {
+  if (gicp_->getInputTarget() == nullptr) { 
     ROS_WARN_STREAM_THROTTLE(1, "No MAP!");
     return;
   }
+
   // align
   Eigen::Matrix4f initial_pose_matrix;
 
   if (!init_pose){    // 初始化是false, 进过初始化回调也是false
 
     // 旋转初值
+    // 2022/11/16
     Eigen::AngleAxisd rotation_vecX(-M_PI/2, Eigen::Vector3d(1,0,0));    
     Eigen::AngleAxisd rotation_vecY(-M_PI/2, Eigen::Vector3d(0,1,0));  
     Eigen::AngleAxisd rotation_vecZ(0, Eigen::Vector3d(0,0,1));  
@@ -208,16 +211,16 @@ void NdtLocalizer::callback_pointcloud(
     // use predicted pose as init guess (currently we only impl linear model)
     initial_pose_matrix = pre_trans * delta_trans;    // 匹配初值
   }
-  
+
   pcl::PointCloud<pcl::PointXYZ>::Ptr output_cloud(new pcl::PointCloud<pcl::PointXYZ>);
   const auto align_start_time = std::chrono::system_clock::now();
   key_value_stdmap_["state"] = "Aligning";
-  ndt_.align(*output_cloud, initial_pose_matrix);    //!!! 匹配初值
+  gicp_->align(*output_cloud, initial_pose_matrix);    //!!! 匹配初值
   key_value_stdmap_["state"] = "Sleeping";
   const auto align_end_time = std::chrono::system_clock::now();
   const double align_time = std::chrono::duration_cast<std::chrono::microseconds>(align_end_time - align_start_time).count() /1000.0;
 
-  const Eigen::Matrix4f result_pose_matrix = ndt_.getFinalTransformation();
+  const Eigen::Matrix4f result_pose_matrix = gicp_->getFinalTransformation();
   Eigen::Affine3d result_pose_affine;
   result_pose_affine.matrix() = result_pose_matrix.cast<double>();
   const geometry_msgs::Pose result_pose_msg = tf2::toMsg(result_pose_affine);
@@ -225,18 +228,19 @@ void NdtLocalizer::callback_pointcloud(
   const auto exe_end_time = std::chrono::system_clock::now();
   const double exe_time = std::chrono::duration_cast<std::chrono::microseconds>(exe_end_time - exe_start_time).count() / 1000.0;
 
-  const float transform_probability = ndt_.getTransformationProbability();    // 匹配的得分
-  const int iteration_num = ndt_.getFinalNumIteration();
+  const int hasConverged = gicp_->hasConverged();   // 如果两个点云匹配正确的话 该函数返回1
+  const float sm_score = gicp_->getFitnessScore();   // 分数越大，配准效果越差
+
+  std::cout << "---: " << sm_score << std::endl; 
 
   bool is_converged = true;
   static size_t skipping_publish_num = 0;
-  if (
-    iteration_num >= ndt_.getMaximumIterations() + 2 ||
-    transform_probability < converged_param_transform_probability_) {
+  if ( hasConverged != true ) { 
+  // if ( hasConverged != true || sm_score > sm_score_) { 
     is_converged = false;
     ++skipping_publish_num;
     std::cout << "Not Converged" << std::endl;
-  } else {
+  } else { 
     skipping_publish_num = 0;
   }
   // calculate the delta tf from pre_trans to current_trans
@@ -267,8 +271,8 @@ void NdtLocalizer::callback_pointcloud(
   result_odom_stamped_msg.pose.pose = result_pose_msg;
 
   if (is_converged) { 
-    ndt_pose_pub_.publish(result_pose_stamped_msg);
-    ndt_odom_pub_.publish(result_odom_stamped_msg);
+    gicp_pose_pub_.publish(result_pose_stamped_msg);
+    gicp_odom_pub_.publish(result_odom_stamped_msg);
   }
 
   // publish tf(map frame to base frame)
@@ -288,59 +292,47 @@ void NdtLocalizer::callback_pointcloud(
   // exe_time_msg.data = exe_time;
   // exe_time_pub_.publish(exe_time_msg); 
 
-  // std_msgs::Float32 transform_probability_msg;
-  // transform_probability_msg.data = transform_probability;
-  // transform_probability_pub_.publish(transform_probability_msg);
-
-  // std_msgs::Float32 iteration_num_msg;
-  // iteration_num_msg.data = iteration_num;
-  // iteration_num_pub_.publish(iteration_num_msg);
-
   key_value_stdmap_["seq"] = std::to_string(sensor_points_sensorTF_msg_ptr->header.seq);
-  key_value_stdmap_["transform_probability"] = std::to_string(transform_probability);
-  key_value_stdmap_["iteration_num"] = std::to_string(iteration_num);
+  key_value_stdmap_["sm_score"] = std::to_string(sm_score);
   key_value_stdmap_["skipping_publish_num"] = std::to_string(skipping_publish_num);
 
   std::cout << "------------------------------------------------" << std::endl;
   std::cout << "align_time: " << align_time << "ms" << std::endl;
   std::cout << "exe_time: " << exe_time << "ms" << std::endl;
-  std::cout << "trans_prob: " << transform_probability << std::endl;
-  std::cout << "iter_num: " << iteration_num << std::endl;
+  std::cout << "sm_score: " << sm_score << std::endl;
   std::cout << "skipping_publish_num: " << skipping_publish_num << std::endl;
 }
 
-void NdtLocalizer::init_params(){
+void GicpLocalizer::init_params(){
 
   private_nh_.getParam("base_frame", base_frame_);
   ROS_INFO("base_frame_id: %s", base_frame_.c_str());
 
-  double trans_epsilon = ndt_.getTransformationEpsilon();
-  double step_size = ndt_.getStepSize();
-  double resolution = ndt_.getResolution();
-  int max_iterations = ndt_.getMaximumIterations();
+  double trans_epsilon = gicp_->getTransformationEpsilon();   //为终止条件设置最小转换差异
+  double cor_dist = gicp_->getMaxCorrespondenceDistance();    //设置对应点对之间的最大距离
+  double euc_eps = gicp_->getEuclideanFitnessEpsilon();    //设置收敛条件是均方误差和小于阈值
+  int max_iterations = gicp_->getMaximumIterations();
 
   private_nh_.getParam("trans_epsilon", trans_epsilon);
-  private_nh_.getParam("step_size", step_size);
-  private_nh_.getParam("resolution", resolution);
+  private_nh_.getParam("cor_dist", cor_dist);
+  private_nh_.getParam("euc_eps", euc_eps);
   private_nh_.getParam("max_iterations", max_iterations);
 
   map_frame_ = "map";
 
-  ndt_.setTransformationEpsilon(trans_epsilon);
-  ndt_.setStepSize(step_size);
-  ndt_.setResolution(resolution);
-  ndt_.setMaximumIterations(max_iterations);
+  gicp_->setTransformationEpsilon(trans_epsilon);
+  gicp_->setMaxCorrespondenceDistance(cor_dist);
+  gicp_->setEuclideanFitnessEpsilon(euc_eps);
+  gicp_->setMaximumIterations(max_iterations);
 
-  ROS_INFO(
-    "trans_epsilon: %lf, step_size: %lf, resolution: %lf, max_iterations: %d", trans_epsilon,
-    step_size, resolution, max_iterations);
+  ROS_INFO("trans_epsilon: %lf, cor_dist: %lf, euc_eps: %lf, max_iterations: %d", trans_epsilon,
+    cor_dist, euc_eps, max_iterations);
 
-  private_nh_.getParam(
-    "converged_param_transform_probability", converged_param_transform_probability_);
+  private_nh_.getParam("scan_match_score", sm_score_);
 }
 
 
-bool NdtLocalizer::get_transform(
+bool GicpLocalizer::get_transform(
   const std::string & target_frame, const std::string & source_frame,
   const geometry_msgs::TransformStamped::Ptr & transform_stamped_ptr, const ros::Time & time_stamp)
 {
@@ -380,7 +372,7 @@ bool NdtLocalizer::get_transform(
   return true;
 }
 
-bool NdtLocalizer::get_transform(
+bool GicpLocalizer::get_transform(
   const std::string & target_frame, const std::string & source_frame,
   const geometry_msgs::TransformStamped::Ptr & transform_stamped_ptr)
 {
@@ -420,7 +412,7 @@ bool NdtLocalizer::get_transform(
   return true;
 }
 
-void NdtLocalizer::publish_tf(
+void GicpLocalizer::publish_tf(
   const std::string & frame_id, const std::string & child_frame_id,
   const geometry_msgs::PoseStamped & pose_msg)
 {
@@ -449,8 +441,8 @@ int main(int argc, char **argv)
     ros::init(argc, argv, "ndt_localizer");
     ros::NodeHandle nh;
     ros::NodeHandle private_nh("~");
-
-    NdtLocalizer ndt_localizer(nh, private_nh);
+    
+    GicpLocalizer gicp_localizer(nh, private_nh);
 
     ros::spin();
 
